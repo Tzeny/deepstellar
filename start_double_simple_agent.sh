@@ -1,1 +1,0 @@
-python -m pysc2.bin.agent --map Simple64 --agent simple_agent.SimpleAgent --agent_race terran --agent2 simple_agent.SimpleAgent --agent2_race terran

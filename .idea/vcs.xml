@@ -3,6 +3,7 @@
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/pysc2" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/pysc2-rl-mini" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/tensorflow_baselines" vcs="Git" />
   </component>
 </project>
