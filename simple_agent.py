@@ -49,6 +49,8 @@ class SimpleAgent(object):
             self.number_of_actions
         ).cuda()
 
+        self.deep_stellar.train(False)
+
         print(' --- Model parameter #: ', sum(p.numel() for p in self.deep_stellar.parameters()))
 
     def setup(self, obs_spec, action_spec):
@@ -128,7 +130,7 @@ class SimpleAgent(object):
 
         continous = continous[0].cpu().detach().numpy()
 
-        ret = self.postprocess_action(action_id, continous)
+        ret = actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])
 
         return ret
 
@@ -137,7 +139,7 @@ def main(unused_argv):
     try:
         while True:
             with sc2_env.SC2Env(
-                    map_name="CollectMineralShards",
+                    map_name="Simple64",
                     players=[sc2_env.Agent(sc2_env.Race.terran),
                             #  sc2_env.Bot(sc2_env.Race.random,
                             #              sc2_env.Difficulty.very_easy)
