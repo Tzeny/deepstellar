@@ -40,7 +40,7 @@ class DeepStellar(torch.nn.Module):
 
         # outputs
         self.continous_dense = torch.nn.Linear(dense_features * 2 + conv_features*2, dense_features)
-        self.continous_output = torch.nn.Linear(dense_features, 3)
+        self.continous_output = torch.nn.Linear(dense_features, 5)
 
         self.action_space_dense = torch.nn.Linear(dense_features * 2 + conv_features*2, dense_features)
         self.action_space_output = torch.nn.Linear(dense_features, action_space)
