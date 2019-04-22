@@ -65,21 +65,28 @@ class SimpleAgent(object):
         for arg in actions.FUNCTIONS[action_id].args:
             # use the same output for screen and minimap moves
             if arg.name in ('screen'):
-                act_args.append([int(p_array[0]*(self.screen_size-1)), int(p_array[1]*(self.screen_size-1))])
+                x = int(p_array[0]*(self.screen_size-1))
+                y = int(p_array[1]*(self.screen_size-1))
+                act_args.append([x, y])
             elif arg.name in ('minimap'):
-                act_args.append([int(p_array[0]*(self.minimap_size-1)), int(p_array[1]*(self.minimap_size-1))])
+                x = int(p_array[0]*(self.minimap_size-1))
+                y = int(p_array[1]*(self.minimap_size-1))
+                act_args.append([x, y])
             elif arg.name in ('screen2'):
-                act_args.append([int(p_array[2]*(self.screen_size-1)), int(p_array[3]*(self.screen_size-1))])
+                x = int(p_array[2]*(self.screen_size-1))
+                y = int(p_array[3]*(self.screen_size-1))
+                act_args.append([x, y])
             elif arg.name in action_dict:
-                act_args.append([int(p_array[4] * (action_dict[arg.name] - 1))])
+                k = int(p_array[4] * (action_dict[arg.name] - 1))
+                act_args.append([k])
             else:
                 raise ValueError(arg.name)
+
+        print(act_args)
                 
         return actions.FunctionCall(action_id, act_args)
 
     def step(self, obs):
-        # ret = actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])  # no-op
-
         a = time.time()
 
         if obs.observation['multi_select'].shape[0] == 0:
@@ -128,9 +135,13 @@ class SimpleAgent(object):
         action_cpu = action[0].cpu().detach().numpy()
         action_id = np.argmax(action_cpu)
 
-        continous = continous[0].cpu().detach().numpy()
+        continous_cpu = continous[0].cpu().detach().numpy()
 
-        ret = actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])
+        print(np.mean(action_cpu))
+        print(np.mean(continous_cpu))
+
+        # ret = actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])
+        ret = self.postprocess_action(action_id, continous_cpu)
 
         return ret
 
@@ -141,8 +152,8 @@ def main(unused_argv):
             with sc2_env.SC2Env(
                     map_name="Simple64",
                     players=[sc2_env.Agent(sc2_env.Race.terran),
-                            #  sc2_env.Bot(sc2_env.Race.random,
-                            #              sc2_env.Difficulty.very_easy)
+                             sc2_env.Bot(sc2_env.Race.random,
+                                         sc2_env.Difficulty.very_easy)
                             ],
                     agent_interface_format=features.AgentInterfaceFormat(
                         feature_dimensions=features.Dimensions(screen=84, minimap=64),
