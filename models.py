@@ -76,16 +76,54 @@ class DeepStellar(torch.nn.Module):
         x_continous = F.relu(self.continous_dense(x_feature))
         x_continous = F.relu(self.continous_output(x_continous))
 
-        x_action = F.relu(self.action_space_dense(x_feature))
-        x_action = self.action_space_output(x_action)
-        x_action = x_action * available_actions
-        x_action = F.softmax(x_action)
+        x_policy = F.relu(self.action_space_dense(x_feature))
+        x_policy = self.action_space_output(x_policy)
+        x_policy = x_policy * available_actions
+        # x_policy = F.softmax(x_policy) # we'll apply this in the loss function
 
         x_value = F.relu(self.value_dense(x_feature))
-        x_value = F.relu(self.value_output(x_value))
+        x_value = self.value_output(x_value)
 
-        return x_continous, x_action, x_value
+        return x_continous, x_policy, x_value
 
+
+    def get_prediction(self, batch_screen, batch_minimap, batch_numerical, available_actions):
+        """
+        Set the model in predicting mode and get a prediction
+        """
+
+        self.training = False # changes the behaviour of certain layers, like BN and Dropout
+        continous, policy, value = self.forward(batch_screen, batch_minimap, batch_numerical, available_actions)
+
+        return continous, F.softmax(policy), value
+
+    # def get_log_probs(self, state):
+    #     body_output = self.get_body_output(state)
+    #     logprobs = F.log_softmax(self.policy(body_output), dim=-1)
+    #     return logprobs 
+
+    # def calc_loss(self, states, actions, rewards, advantages, beta=0.001):
+    #     actions_t = torch.LongTensor(actions).to(self.network.device)
+    #     rewards_t = torch.FloatTensor(rewards).to(self.network.device)
+    #     advantages_t = torch.FloatTensor(advantages).to(self.network.device)
+        
+    #     continouss, policys, values = self.forward(states)
+
+    #     log_probs = 
+    #     log_prob_actions = advantages_t * log_probs[range(len(actions)), actions]
+    #     policy_loss = -log_prob_actions.mean()
+        
+    #     action_probs, values = self.network.predict(states)
+    #     entropy_loss = -self.beta * (action_probs * log_probs).sum(dim=1).mean()
+        
+    #     value_loss = self.zeta * nn.MSELoss()(values.squeeze(-1), rewards_t)
+        
+    #     # Append values
+    #     self.policy_loss.append(policy_loss)
+    #     self.value_loss.append(value_loss)
+    #     self.entropy_loss.append(entropy_loss)
+        
+    #     return policy_loss, entropy_loss, value_loss
 
 
 
