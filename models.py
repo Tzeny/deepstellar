@@ -12,7 +12,8 @@ class DeepStellar(torch.nn.Module):
         minimap_height, 
         minimap_features,
         numerical_features,
-        action_space):
+        action_space_len,
+        continous_len):
         super().__init__()
 
         padding_size = 1
@@ -40,15 +41,15 @@ class DeepStellar(torch.nn.Module):
 
         # outputs
         self.continous_dense = torch.nn.Linear(dense_features * 2 + conv_features*2, dense_features)
-        self.continous_output = torch.nn.Linear(dense_features, 5)
+        self.continous_output = torch.nn.Linear(dense_features, continous_len)
 
         self.action_space_dense = torch.nn.Linear(dense_features * 2 + conv_features*2, dense_features)
-        self.action_space_output = torch.nn.Linear(dense_features, action_space)
+        self.action_space_output = torch.nn.Linear(dense_features, action_space_len)
 
         self.value_dense = torch.nn.Linear(dense_features * 2 + conv_features*2, dense_features)
         self.value_output = torch.nn.Linear(dense_features, 1)
 
-    def forward(self, batch_screen, batch_minimap, batch_numerical, available_actions):
+    def forward(self, batch_screen, batch_minimap, batch_numerical):
         # x = (batch, smth)
 
         # visual features
@@ -74,11 +75,11 @@ class DeepStellar(torch.nn.Module):
 
         # outputs
         x_continous = F.relu(self.continous_dense(x_feature))
-        x_continous = F.relu(self.continous_output(x_continous))
+        x_continous = F.sigmoid(self.continous_output(x_continous))
 
         x_policy = F.relu(self.action_space_dense(x_feature))
         x_policy = self.action_space_output(x_policy)
-        x_policy = x_policy * available_actions
+        # x_policy = x_policy * available_actions
         # x_policy = F.softmax(x_policy) # we'll apply this in the loss function
 
         x_value = F.relu(self.value_dense(x_feature))
@@ -93,39 +94,15 @@ class DeepStellar(torch.nn.Module):
         """
 
         self.training = False # changes the behaviour of certain layers, like BN and Dropout
-        continous, policy, value = self.forward(batch_screen, batch_minimap, batch_numerical, available_actions)
+        continous, policy, value = self.forward(batch_screen, batch_minimap, batch_numerical)
+        policy = F.softmax(policy) * available_actions
 
-        return continous, F.softmax(policy), value
+        return continous, policy, value
 
-    # def get_log_probs(self, state):
-    #     body_output = self.get_body_output(state)
-    #     logprobs = F.log_softmax(self.policy(body_output), dim=-1)
-    #     return logprobs 
+    def loss(self):
+        self.train()
 
-    # def calc_loss(self, states, actions, rewards, advantages, beta=0.001):
-    #     actions_t = torch.LongTensor(actions).to(self.network.device)
-    #     rewards_t = torch.FloatTensor(rewards).to(self.network.device)
-    #     advantages_t = torch.FloatTensor(advantages).to(self.network.device)
-        
-    #     continouss, policys, values = self.forward(states)
-
-    #     log_probs = 
-    #     log_prob_actions = advantages_t * log_probs[range(len(actions)), actions]
-    #     policy_loss = -log_prob_actions.mean()
-        
-    #     action_probs, values = self.network.predict(states)
-    #     entropy_loss = -self.beta * (action_probs * log_probs).sum(dim=1).mean()
-        
-    #     value_loss = self.zeta * nn.MSELoss()(values.squeeze(-1), rewards_t)
-        
-    #     # Append values
-    #     self.policy_loss.append(policy_loss)
-    #     self.value_loss.append(value_loss)
-    #     self.entropy_loss.append(entropy_loss)
-        
-    #     return policy_loss, entropy_loss, value_loss
-
-
-
+        policy_loss = 0 # will be comprised of policy_action_loss and policy_continous_loss
+        value_loss = 0
         
 
