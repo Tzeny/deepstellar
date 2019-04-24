@@ -5,6 +5,7 @@ import time
 
 import torch
 from torch.autograd import Variable
+import torch.nn.functional as F
 import torch.autograd as autograd
 import torch.optim as optim
 
@@ -57,7 +58,9 @@ class SimpleAgent(object):
             self.number_of_actions,
             self.number_of_continous
         )
-        
+        if device.type != 'cpu':
+            self.deep_stellar = self.deep_stellar.cuda()
+
         self.deep_stellar.train(False)
         self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-3)
 
@@ -179,8 +182,8 @@ class SimpleAgent(object):
         continous_distribution = continous.cpu().detach().numpy()
 
         # sample from a normal distribution centered around our desired coordinates
-        for i in range(continous[0].shape[0]):
-            continous[0][i] = torch.distributions.Normal(continous[0][i], 0.15).sample()
+        # for i in range(continous[0].shape[0]):
+        #     continous[0][i] = torch.distributions.Normal(continous[0][i], 0.15).sample()
         continous = continous.clamp(0,1)
 
 
@@ -240,29 +243,33 @@ class SimpleAgent(object):
         state_numerical = Variable(torch.Tensor(self.step_recordings['state_numerical']).to(device))
         state_available_actions = Variable(torch.Tensor(self.step_recordings['state_available_actions']).to(device))
 
+        self.deep_stellar.train(False)
 
-        continous_probs, action_probs, value_ests = self.deep_stellar.get_prediction(
+        continous_probs, policy_probs, value_ests = self.deep_stellar(
             state_screen,
             state_minimap,
             state_numerical,
-            state_available_actions,
         )
-        action_log_probs = action_probs.log()
 
         actions_taken = Variable(torch.LongTensor(self.step_recordings['action_chosen']).view(-1,1).to(device))
-        actions_taken_log_probs = action_log_probs.gather(1, actions_taken)
+        actions_taken_log_probs = F.log_softmax(policy_probs, dim=1).gather(1, actions_taken)
 
         # also the TD error
+        value_ests = value_ests.squeeze() # flatten 
         advantages = state_values_true - value_ests
 
-        entropy = (action_probs * action_log_probs).sum(1).mean()
+        # entropy will have a negative positive value, but it is substracted from the loss so everythin is ok
+        entropy = F.softmax(policy_probs, dim=1) * F.log_softmax(policy_probs, dim=1)
+        entropy = entropy.sum() 
+
         action_gain = (actions_taken_log_probs * advantages).mean()
+        continous_action_gain = (continous_probs.log().t() * advantages).mean()
 
         value_loss = advantages.pow(2).mean()
-        total_loss = value_loss - action_gain - 1e-4 * entropy
+        total_loss = value_loss - (action_gain + continous_action_gain) - 1e-4 * entropy
 
         # take optimizer step
-        self.deep_stellar.train()
+        self.deep_stellar.train(True)
 
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -290,7 +297,7 @@ class SimpleAgent(object):
 def main(unused_argv):
     agent = SimpleAgent()
 
-    map_name = "MoveToBeacon" # "CollectMineralShards" "Simple64" MoveToBeacon
+    map_name = "CollectMineralShards" # "CollectMineralShards" "Simple64" MoveToBeacon
 
     if  map_name == "Simple64":
         players = [sc2_env.Agent(sc2_env.Race.terran),
