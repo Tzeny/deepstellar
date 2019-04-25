@@ -228,7 +228,7 @@ class SimpleAgent(object):
                 self.update_actual_state_values(value_cpu, 0.95)
 
                 # train
-                self.reflect()
+                # self.reflect()
 
         self.steps += 1
         self.reward += obs.reward
@@ -254,16 +254,16 @@ class SimpleAgent(object):
         actions_taken = Variable(torch.LongTensor(self.step_recordings['action_chosen']).view(-1,1).to(device))
         actions_taken_log_probs = F.log_softmax(policy_probs, dim=1).gather(1, actions_taken)
 
-        # also the TD error
         value_ests = value_ests.squeeze() # flatten 
-        advantages = state_values_true - value_ests
+        advantages = state_values_true - value_ests # also the TD error
 
         # entropy will have a negative positive value, but it is substracted from the loss so everythin is ok
         entropy = F.softmax(policy_probs, dim=1) * F.log_softmax(policy_probs, dim=1)
         entropy = entropy.sum() 
 
-        action_gain = (actions_taken_log_probs * advantages).mean()
-        continous_action_gain = (continous_probs.log().t() * advantages).mean()
+        # not sure about squeeze and @
+        action_gain = (actions_taken_log_probs.squeeze() * advantages).mean()
+        continous_action_gain = (continous_probs.log().t() @ advantages).mean()
 
         value_loss = advantages.pow(2).mean()
         total_loss = value_loss - (action_gain + continous_action_gain) - 1e-4 * entropy
