@@ -66,39 +66,23 @@ class SimpleAgent(object):
 
         self.train_interval = 10
 
-        # dtypes = [
-        #     ('step', np.int32),
-        #     ('reward', np.float32),
-        #     # critic
-        #     ('predicted_V', np.float32),
-        #     ('actual_V', np.float32),
-        #     ('error', np.float32),
-        #     # actor
-        #     ('entropy', np.float32),
-        #     ('spatial_entropy', np.float32),
-        #     ('non_spatial_entropy', np.float32),
+        dtypes = [
+            ('step', np.int32),
+            ('predicted_V', np.float32),
+            ('actual_V', np.float32),
+            ('error', np.float32),
 
-        #     ('spatial_action_log', np.float32),
-        #     ('non_spatial_action_log', np.float32),
-        #     ('action_chosen', np.int16),
-        #     ('continous_chosen', np.float32, (self.number_of_continous)),
+            ('state_screen', np.uint8, (17, self.screen_size, self.screen_size)),
+            ('state_minimap', np.uint8, (7, self.minimap_size, self.minimap_size)),
+            ('state_numerical', np.uint8, (61)),
+            ('state_available_actions', np.uint8, (self.number_of_actions)),
+            ('action_chosen', np.int16),
 
-        #     # ('state_screen', np.uint8, (17, self.screen_size, self.screen_size)),
-        #     # ('state_minimap', np.uint8, (7, self.minimap_size, self.minimap_size)),
-        #     # ('state_numerical', np.uint8, (61)),
-        #     # ('state_available_actions', np.uint8, (self.number_of_actions)),
-        # ]
+            ('continous_chosen', np.float32, (self.number_of_continous)),
+            ('reward', np.float32)
+        ]
 
-        # self.step_recordings = np.empty(self.train_interval, dtype=dtypes)
-
-        self.data = {
-            'action_entropy': [],
-            'action_log': [],
-            'continous_log': [],
-            'value': [],
-            'predicted_value': [],
-            'reward': [], 
-        }
+        self.step_recordings = np.empty(self.train_interval, dtype=dtypes)
 
         print(' --- Model parameter #: ', sum(p.numel() for p in self.deep_stellar.parameters()))
 
@@ -110,9 +94,6 @@ class SimpleAgent(object):
         self.episodes += 1
 
     def postprocess_action(self, action_id, p_array):
-        action_id = action_id.cpu().detach().numpy()
-        p_array = p_array.cpu().detach().numpy()
-
         act_args = []
         for arg in actions.FUNCTIONS[action_id].args:
             # use the same output for screen and minimap moves
@@ -191,59 +172,113 @@ class SimpleAgent(object):
 
         # predict
 
-        screen_ft = Variable(
-            torch.Tensor(np.expand_dims(obs.observation['feature_screen'],0)).to(device))
-        minimap_ft = Variable(
-            torch.Tensor(np.expand_dims(obs.observation['feature_minimap'],0)).to(device))
-        numerical_obs =  Variable(
-            torch.Tensor(np.expand_dims(numerical_observations,0)).to(device))
-        available_actions_obs = torch.Tensor(np.expand_dims(available_actions,0)).to(device),
-
         continous, action, value = self.deep_stellar.get_prediction(
-            screen_ft,
-            minimap_ft,
-            numerical_obs,
-            available_actions_obs,
+            torch.Tensor(np.expand_dims(obs.observation['feature_screen'],0)).to(device),
+            torch.Tensor(np.expand_dims(obs.observation['feature_minimap'],0)).to(device),
+            torch.Tensor(np.expand_dims(numerical_observations,0)).to(device),
+            torch.Tensor(np.expand_dims(available_actions,0)).to(device),
         )
 
-        # since everything is batch sized we only care about the first element
-        action_id = action[0].multinomial(1)[0]
-        continous = continous.clamp(0,1)[0]
-        value = value[0]
+        continous_distribution = continous.cpu().detach().numpy()
 
-        
-        chosen_parameterized_action = self.postprocess_action(action_id, continous_cpu)
+        # sample from a normal distribution centered around our desired coordinates
+        # for i in range(continous[0].shape[0]):
+        #     continous[0][i] = torch.distributions.Normal(continous[0][i], 0.15).sample()
+        continous = continous.clamp(0,1)
 
-        # avoid log(0)
-        action_entropy = torch.log(torch.clamp(action, min=1e-12)) * action).sum(1)  
 
-        action_log =  torch.log(action.gather(1, Variable(action_id)))
-        continous_log = torch.log(continous)
+        #action_cpu = action[0].cpu().detach().numpy()
+        #action_id = np.argmax(action_cpu)
+        # action *= torch.Tensor(available_actions).to(device)
 
-        self.data['action_entropy'].append(action_entropy)
-        self.data['action_log'].append(action_log)
-        self.data['continous_log'].append(continous_log)
-        self.data['predicted_value'].append(value)
+        # action_id = -1
+        # while action_id not in obs.observation['available_actions']:
+
+        action_id = action[0].multinomial(1).cpu().detach().numpy()[0]
+        # action_id = np.random.multinomial(1, action_distribution)[0]
+        continous_cpu = continous[0].cpu().detach().numpy()
+        value_cpu = value[0].cpu().detach().numpy()[0]
+
+        # print(np.mean(action_cpu))
+        # print(np.mean(continous_cpu))
+
+        # ret = actions.FunctionCall(actions.FUNCTIONS.no_op.id, [])
+        ret = self.postprocess_action(action_id, continous_cpu)
+
+        index = self.steps % self.train_interval
+        self.step_recordings[index]['step'] = self.steps
+        self.step_recordings[index]['predicted_V'] = value_cpu
+
+        self.step_recordings[index]['state_screen'] = obs.observation['feature_screen']
+        self.step_recordings[index]['state_minimap'] = obs.observation['feature_minimap']
+        self.step_recordings[index]['state_numerical'] = numerical_observations
+        self.step_recordings[index]['state_available_actions'] = available_actions
+
+        self.step_recordings[index]['action_chosen'] = action_id
+        self.step_recordings[index]['continous_chosen'] = continous_cpu
 
         if obs.reward != 0:
             print(obs.reward)
 
         if self.steps > 0:
-            self.data['reward'].append(obs.reward)
+            self.step_recordings[index-1]['reward'] = obs.reward
 
             # we do this so that we can use all the values in step_recordings
-            if self.steps % self.train_interval == 0:
-                self.update_actual_state_values(value_cpu, 0.95)
+            # if self.steps % self.train_interval == 0:
+            #     self.update_actual_state_values(value_cpu, 0.95)
 
-                # train
-                self.reflect()
+            #     # train
+            #     self.reflect()
 
         self.steps += 1
         self.reward += obs.reward
 
-        return chosen_parameterized_action
+        return ret
 
-    def update_value_and_reflect(self, latest_reward):
+    def reflect(self):
+        state_values_true = torch.Tensor(self.step_recordings['actual_V']).to(device)
+
+        state_screen = Variable(torch.Tensor(self.step_recordings['state_screen']).to(device))
+        state_minimap = Variable(torch.Tensor(self.step_recordings['state_minimap']).to(device))
+        state_numerical = Variable(torch.Tensor(self.step_recordings['state_numerical']).to(device))
+        state_available_actions = Variable(torch.Tensor(self.step_recordings['state_available_actions']).to(device))
+
+        self.deep_stellar.train(False)
+
+        continous_probs, policy_probs, value_ests = self.deep_stellar(
+            state_screen,
+            state_minimap,
+            state_numerical,
+        )
+
+        actions_taken = Variable(torch.LongTensor(self.step_recordings['action_chosen']).view(-1,1).to(device))
+        actions_taken_log_probs = F.log_softmax(policy_probs, dim=1).gather(1, actions_taken)
+
+        value_ests = value_ests.squeeze() # flatten 
+        advantages = state_values_true - value_ests # also the TD error
+
+        # entropy will have a negative positive value, but it is substracted from the loss so everythin is ok
+        entropy = F.softmax(policy_probs, dim=1) * F.log_softmax(policy_probs, dim=1)
+        entropy = entropy.sum() 
+
+        # not sure about squeeze and @
+        action_gain = (actions_taken_log_probs.squeeze() * advantages).mean()
+        continous_action_gain = (continous_probs.log().t() @ advantages).mean()
+
+        value_loss = advantages.pow(2).mean()
+        total_loss = value_loss - (action_gain + continous_action_gain) - 1e-4 * entropy
+
+        # take optimizer step
+        self.deep_stellar.train(True)
+
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm(self.deep_stellar.parameters(), 0.5)
+        self.optimizer.step()
+
+        self.deep_stellar.train(False)
+
+    def update_actual_state_values(self, latest_value, gamma):
         """
         Calculate actual_V for all elements in self.step_recordings except the last one
         """
