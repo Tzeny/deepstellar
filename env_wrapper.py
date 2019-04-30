@@ -50,51 +50,41 @@ def get_available_actions_numpy(obs):
 
     return available_actions
 
-def postprocess_action(action_id, p_array, screen_size, minimap_size):
-    action_id = action_id.cpu().detach().numpy()[0]
-    p_array = p_array.cpu().detach().numpy()
+def postprocess_action(model_out, screen_size, minimap_size):
+    # (selected_screen_0,   selected_screen_1,  selected_minimap_0, F.relu(first_arg[0]),   selected_action,    value[0])
+    action_id = model_out[4]
 
     act_args = []
+
+    screen_0_weight = 0
+    screen_1_weight = 0
+    minimap_0_weight = 0
+
     for arg in actions.FUNCTIONS[action_id].args:
         # use the same output for screen and minimap moves
         if arg.name in ('screen'):
-            x = p_array[0]*(screen_size-1)
-            y = p_array[1]*(screen_size-1)
-
-            # if x >= arg.sizes[0]:
-            #     x = arg.sizes[0] - epsilon
-            # if y >= arg.sizes[1]:
-            #     y = arg.sizes[1] - epsilon
-
-            act_args.append([int(x), int(y)])
-        elif arg.name in ('minimap'):
-            x = p_array[0]*(minimap_size-1)
-            y = p_array[1]*(minimap_size-1)
-
-            # if x >= arg.sizes[0]:
-            #     x = arg.sizes[0] - epsilon
-            # if y >= arg.sizes[1]:
-            #     y = arg.sizes[1] - epsilon
+            x = model_out[0][0]
+            y = model_out[0][1]
+            screen_0_weight = 1
 
             act_args.append([int(x), int(y)])
         elif arg.name in ('screen2'):
-            x = p_array[2]*(screen_size-1)
-            y = p_array[3]*(screen_size-1)
+            x = model_out[1][0]
+            y = model_out[1][1]
+            screen_1_weight = 1
 
-            # if x >= arg.sizes[0]:
-            #     x = arg.sizes[0] - epsilon
-            # if y >= arg.sizes[1]:
-            #     y = arg.sizes[1] - epsilon
+            act_args.append([int(x), int(y)])
+        elif arg.name in ('minimap'):
+            x = model_out[2][0]
+            y = model_out[2][1]
+            minimap_0_weight = 1
 
             act_args.append([int(x), int(y)])
         elif arg.name in action_dict:
-            k = p_array[4] * (action_dict[arg.name] - 1)
-
-            # if k >= arg.sizes[0]:
-            #     k = arg.sizes[0] - epsilon
+            k = model_out[3] * (action_dict[arg.name] - 1)
 
             act_args.append([int(k)])
         else:
             raise ValueError(arg.name)
 
-    return actions.FunctionCall(action_id, act_args)
+    return actions.FunctionCall(action_id, act_args), screen_0_weight, screen_1_weight, minimap_0_weight

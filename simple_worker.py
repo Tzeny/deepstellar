@@ -57,11 +57,14 @@ class SimpleWorker(object):
 
         env_seed = 1337 if test_mode else None
 
+        self.screen_size = 84
+        self.minimap_size = 84
+
         self.env_config = dict(
             map_name=map_name,
             players=players,
             agent_interface_format=features.AgentInterfaceFormat(
-                feature_dimensions=features.Dimensions(screen=84, minimap=64),
+                feature_dimensions=features.Dimensions(screen=self.screen_size, minimap=self.minimap_size),
                 use_feature_units=True),
             step_mul=16,
             game_steps_per_episode=0,
@@ -72,9 +75,6 @@ class SimpleWorker(object):
         self.action_list = [i for i in range(len(actions.FUNCTIONS))]
         self.number_of_actions = len(self.action_list)
         self.number_of_continous = 5
-
-        self.screen_size = 84
-        self.minimap_size = 64
 
         self.deep_stellar = DeepStellar(
             self.screen_size,
@@ -95,7 +95,7 @@ class SimpleWorker(object):
 
         self.num_forward_steps = 20
 
-    def run_n_times(self, max_number_of_episodes=10):
+    def run_n_times(self, max_number_of_episodes=100):
         episode_counter = 0
 
         data = {
@@ -107,11 +107,9 @@ class SimpleWorker(object):
             'reward': [], 
         }
 
-        gamma = 0.99
-        tau = 1.00
-        entropy_weight = 1e-3
-        max_grad_norm = 10
-        epsilon = torch.Tensor([0.2])
+        gamma = 0.95
+        entropy_weight = 1e-4
+        max_grad_norm = 0.5
 
         with sc2_env.SC2Env(**self.env_config) as env:
             obs = env.reset()[0]
@@ -121,9 +119,14 @@ class SimpleWorker(object):
 
             while True:
                 data = {
+                    'screen_0_entropy': [],
+                    'screen_0_log': [],  
+                    'screen_1_entropy': [],
+                    'screen_1_log': [],                   
+                    'minimap_0_entropy': [],
+                    'minimap_0_log': [],                     
                     'action_entropy': [],
                     'action_log': [],
-                    'continous_log': [],
                     'value': [],
                     'predicted_value': [],
                     'reward': [], 
@@ -131,35 +134,57 @@ class SimpleWorker(object):
                 gc.collect()
 
                 # take num_forward_steps simulation steps
-                for step in range(self.num_forward_steps):
-                    continous, action, value = self.run_model_on_observation(obs)
+                for _ in range(self.num_forward_steps):
+                    # (
+                    #     screen_0, 
+                    #     screen_1, 
+                    #     minimap_0, 
+                    #     first_arg, 
+                    #     action, 
+                    #     value
+                    # ),
+                    # (
+                    #     selected_screen_0_t,
+                    #     selected_screen_1_t,
+                    #     selected_minimap_0_t,
+                    #     selected_action_t,
+                    #     value,
+                    # ),
+                    model_out = self.run_model_on_observation(obs)
 
-                    # since everything is batch sized we only care about the first element
-                    # we'll use epsilon greedy for the continous outputs
-                    continous = continous.clamp(0,1)[0]
-
-                    normal_distrib_samples = [torch.distributions.normal.Normal(el, epsilon).sample() for el in continous]
-                    continous = torch.cat(normal_distrib_samples).clamp(0,1)
-
-                    action_id = action[0].multinomial(1)
-                    value = value[0]
-
-                    sc2_action = postprocess_action(action_id, continous, self.screen_size, self.minimap_size)
+                    # we'll use the weights for screen and minimap to set the loss and entropy
+                    # to 0 for cases where we choose an action not directly impacting them
+                    sc2_action, screen_0_weight, screen_1_weight, minimap_0_weight = postprocess_action(model_out[2], self.screen_size, self.minimap_size)
 
                     # take step
                     obs = env.step([sc2_action])[0]
                     episode_done = obs.last()
 
+                    screen_0_prob = F.softmax(model_out[0][0], dim=1)
+                    screen_1_prob = F.softmax(model_out[0][1], dim=1)
+                    minimap_0_prob = F.softmax(model_out[0][2], dim=1)
+                    action_0_prob = F.softmax(model_out[0][4], dim=1)
+
                     # record outcome
-                    action_entropy = (F.softmax(action, dim=1) * F.log_softmax(action, dim=1)).sum()  
+                    screen_0_entropy = (screen_0_prob * screen_0_prob.clamp(min=1e-12).log()).sum().reshape(1) * screen_0_weight
+                    screen_1_entropy = (screen_1_prob * screen_1_prob.clamp(min=1e-12).log()).sum().reshape(1) * screen_1_weight
+                    minimap_0_entropy = (minimap_0_prob * minimap_0_prob.clamp(min=1e-12).log()).sum().reshape(1) * minimap_0_weight
+                    action_entropy = (action_0_prob * action_0_prob.clamp(min=1e-12).log()).sum().reshape(1)
 
-                    action_log =  torch.log(action[0].gather(0, Variable(action_id)))
+                    screen_0_log =  torch.log(screen_0_prob[0].gather(0, Variable(model_out[1][0]))) * screen_0_weight
+                    screen_1_log =  torch.log(screen_1_prob[0].gather(0, Variable(model_out[1][1]))) * screen_1_weight
+                    minimap_0_log =  torch.log(minimap_0_prob[0].gather(0, Variable(model_out[1][2]))) * minimap_0_weight
+                    action_log =  torch.log(action_0_prob[0].gather(0, Variable(model_out[1][4])))
 
-                    continous_log = torch.log(torch.clamp(continous, min=1e-12)).reshape(-1, 1)
+                    data['screen_0_entropy'].append(screen_0_entropy)
+                    data['screen_0_log'].append(screen_0_log)
+                    data['screen_1_entropy'].append(screen_1_entropy)
+                    data['screen_1_log'].append(screen_1_log)
+                    data['minimap_0_entropy'].append(minimap_0_entropy)
+                    data['minimap_0_log'].append(minimap_0_log)                                        
                     data['action_entropy'].append(action_entropy)
                     data['action_log'].append(action_log)
-                    data['continous_log'].append(continous_log)
-                    data['predicted_value'].append(value)
+                    data['predicted_value'].append(model_out[0][5])
                     data['reward'].append(obs.reward)
 
                     episode_length += 1
@@ -168,16 +193,14 @@ class SimpleWorker(object):
                         episode_counter += 1
                         episode_length = 0
                         obs = env.reset()[0]
-
-                        epsilon -= 0.0025
                         break
 
                 # estimate reward based on policy
                 reward = torch.zeros(1,1).to(device)
                 if not episode_done: 
                     # if we are not done yet, bootstrap value from our latest estimate
-                    _, _, value = self.run_model_on_observation(obs)
-                    reward = value[0]
+                    model_out = self.run_model_on_observation(obs)
+                    reward = model_out[0][5]
 
                 reward = Variable(reward)
                 data['predicted_value'].append(reward)
@@ -188,13 +211,12 @@ class SimpleWorker(object):
 
                 # go backwards in time from our latest step
                 reward_count = len(data['reward'])
-
+                # gae_ts = torch.zeros(1, 1).to(device)
                 for i in reversed(range(reward_count)):
                     reward = gamma * reward + data['reward'][i]
                     data['value'].append(reward)
 
-                    # advantage = reward - data['predicted_value'][i]
-                    # value_loss += advantage.pow(2)
+                    # tderr_ts = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
 
                 data['value'].reverse()
 
@@ -203,19 +225,25 @@ class SimpleWorker(object):
 
                 advantages = predicted_values - values
 
-                data['action_entropy'] = [el.unsqueeze(0) for el in data['action_entropy']]
-                entropy = torch.cat(data['action_entropy']).sum()
-                action_gain = (torch.cat(data['action_log']) * advantages).mean()
-                continous_gain = (torch.cat(data['continous_log'], dim=1) * advantages).mean()
+                entropy = (torch.cat(data['screen_0_entropy']).sum() +
+                    torch.cat(data['screen_1_entropy']).sum() +
+                    torch.cat(data['minimap_0_entropy']).sum() +
+                    torch.cat(data['action_entropy']).sum())
+                action_gain = ((torch.cat(data['screen_0_log']) * advantages).mean() + 
+                    (torch.cat(data['screen_1_log']) * advantages).mean() + 
+                    (torch.cat(data['minimap_0_log']) * advantages).mean() + 
+                    (torch.cat(data['action_log']) * advantages).mean())
+
                 value_loss = advantages.pow(2).mean()
-                total_loss = value_loss - action_gain - continous_gain - 0.0001*entropy
+                total_loss = value_loss - action_gain - entropy_weight * entropy
+
+                # if np.sum(np.array(data['reward'])) > 0:
+                #     print('hooray')
 
                 self.optimizer.zero_grad()
 
                 self.deep_stellar.train(True)
 
-                # loss = policy_loss + 0.5 * value_loss
-                # loss = value_loss.mean()
                 print(total_loss)
                 total_loss.backward()
 
@@ -226,10 +254,6 @@ class SimpleWorker(object):
 
                 if episode_counter > max_number_of_episodes:
                     break
-
-                
-
-                
 
     def run_model_on_observation(self, obs):
         self.deep_stellar.train(False)
@@ -243,16 +267,56 @@ class SimpleWorker(object):
         available_actions_obs = torch.Tensor(
             np.expand_dims(get_available_actions_numpy(obs),0)).to(device)
 
-        continous, action, value = self.deep_stellar.get_prediction(
+        screen_0, screen_1, minimap_0, first_arg, action, value = self.deep_stellar(
             screen_ft,
             minimap_ft,
             numerical_obs,
-            available_actions_obs,
         )
 
-        return continous, action, value
+        selected_action_t = (F.softmax(action) * available_actions_obs)[0].multinomial(1)
+        selected_action = selected_action_t.cpu().detach().numpy()[0]
 
+        selected_screen_0_t = F.softmax(screen_0)[0].multinomial(1)
+        selected_screen_0 = selected_screen_0_t.cpu().detach().numpy()[0]
+        # transform the selection into a (x, y) tuple
+        selected_screen_0 = (selected_screen_0 // self.screen_size, selected_screen_0 % self.screen_size)
 
+        selected_screen_1_t = F.softmax(screen_1)[0].multinomial(1)
+        selected_screen_1 = selected_screen_1_t.cpu().detach().numpy()[0]
+        selected_screen_1 = (selected_screen_1 // self.screen_size, selected_screen_1 % self.screen_size)
+
+        selected_minimap_0_t = F.softmax(minimap_0)[0].multinomial(1)
+        selected_minimap_0 = selected_minimap_0_t.cpu().detach().numpy()[0]
+        selected_minimap_0 = (selected_minimap_0 // self.minimap_size, selected_minimap_0 % self.minimap_size)
+
+        # position 0 - model output
+        # position 1 - processed output
+        return (
+            (
+                screen_0, 
+                screen_1, 
+                minimap_0, 
+                first_arg, 
+                action, 
+                value
+            ),
+            (
+                selected_screen_0_t,
+                selected_screen_1_t,
+                selected_minimap_0_t,
+                first_arg,
+                selected_action_t,
+                value,
+            ),
+            (
+                selected_screen_0, 
+                selected_screen_1, 
+                selected_minimap_0, 
+                torch.clamp(F.relu(first_arg[0]), 0, 1).cpu().detach().numpy()[0], 
+                selected_action, 
+                value[0].cpu().detach().numpy()[0]
+            )
+        )
 
 
 def main(unused_argv):
@@ -260,7 +324,7 @@ def main(unused_argv):
 
     worker = SimpleWorker(map_name,visualize=True)
 
-    worker.run_n_times(20)
+    worker.run_n_times()
 
 
 if __name__ == "__main__":
