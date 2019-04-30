@@ -93,7 +93,7 @@ class SimpleWorker(object):
         self.deep_stellar.train(False)
         self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-3)
 
-        self.num_forward_steps = 10
+        self.num_forward_steps = 20
 
     def run_n_times(self, max_number_of_episodes=10):
         episode_counter = 0
@@ -111,7 +111,7 @@ class SimpleWorker(object):
         tau = 1.00
         entropy_weight = 1e-3
         max_grad_norm = 10
-        epsilon = 1.
+        epsilon = torch.Tensor([0.2])
 
         with sc2_env.SC2Env(**self.env_config) as env:
             obs = env.reset()[0]
@@ -137,14 +137,9 @@ class SimpleWorker(object):
                     # since everything is batch sized we only care about the first element
                     # we'll use epsilon greedy for the continous outputs
                     continous = continous.clamp(0,1)[0]
-                    sample_from_normal = np.random.rand(continous.shape[0])
-                    continous_random = torch.rand(continous.shape).to(device)
 
-                    for i in range(continous.shape[0]):
-                        if sample_from_normal[i] > epsilon:
-                            continous_random[i] = continous[i]
-
-                    continous = continous_random
+                    normal_distrib_samples = [torch.distributions.normal.Normal(el, epsilon).sample() for el in continous]
+                    continous = torch.cat(normal_distrib_samples).clamp(0,1)
 
                     action_id = action[0].multinomial(1)
                     value = value[0]
@@ -156,11 +151,11 @@ class SimpleWorker(object):
                     episode_done = obs.last()
 
                     # record outcome
-                    action_entropy = F.softmax(action, dim=1) * F.log_softmax(action, dim=1).sum()  
+                    action_entropy = (F.softmax(action, dim=1) * F.log_softmax(action, dim=1)).sum()  
 
                     action_log =  torch.log(action[0].gather(0, Variable(action_id)))
-                    continous_log = torch.log(torch.clamp(continous, min=1e-12))
 
+                    continous_log = torch.log(torch.clamp(continous, min=1e-12)).reshape(-1, 1)
                     data['action_entropy'].append(action_entropy)
                     data['action_log'].append(action_log)
                     data['continous_log'].append(continous_log)
@@ -174,7 +169,7 @@ class SimpleWorker(object):
                         episode_length = 0
                         obs = env.reset()[0]
 
-                        epsilon -= 0.1
+                        epsilon -= 0.0025
                         break
 
                 # estimate reward based on policy
@@ -192,28 +187,37 @@ class SimpleWorker(object):
                 gae = torch.zeros(1,1).to(device)
 
                 # go backwards in time from our latest step
-                for i in reversed(range(len(data['reward']))):
+                reward_count = len(data['reward'])
+
+                for i in reversed(range(reward_count)):
                     reward = gamma * reward + data['reward'][i]
                     data['value'].append(reward)
 
-                    advantage = reward - data['predicted_value'][i]
+                    # advantage = reward - data['predicted_value'][i]
+                    # value_loss += advantage.pow(2)
 
-                    value_loss += 0.5 * advantage.pow(2)
+                data['value'].reverse()
 
-                    tderr = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
-                    gae =  gae * gamma * tau + tderr
+                values = torch.cat(data['value']).squeeze()
+                predicted_values = torch.cat(data['predicted_value'][:-1]).squeeze()
 
-                    # action loss
-                    policy_loss += -(data['action_log'][i] * Variable(gae) + entropy_weight * data['action_entropy'][i]).sum()
-                    # continous loss
-                    policy_loss += -(data['continous_log'][i] * Variable(gae)).sum()
+                advantages = predicted_values - values
+
+                data['action_entropy'] = [el.unsqueeze(0) for el in data['action_entropy']]
+                entropy = torch.cat(data['action_entropy']).sum()
+                action_gain = (torch.cat(data['action_log']) * advantages).mean()
+                continous_gain = (torch.cat(data['continous_log'], dim=1) * advantages).mean()
+                value_loss = advantages.pow(2).mean()
+                total_loss = value_loss - action_gain - continous_gain - 0.0001*entropy
 
                 self.optimizer.zero_grad()
 
                 self.deep_stellar.train(True)
 
-                loss = policy_loss + 0.5 * value_loss
-                loss.backward()
+                # loss = policy_loss + 0.5 * value_loss
+                # loss = value_loss.mean()
+                print(total_loss)
+                total_loss.backward()
 
                 # prevent gradient explosion
                 torch.nn.utils.clip_grad_norm_(self.deep_stellar.parameters(), max_grad_norm)
