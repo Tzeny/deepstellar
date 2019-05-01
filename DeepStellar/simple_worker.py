@@ -1,15 +1,21 @@
 from pysc2.env import sc2_env
 from pysc2.lib import actions, features, units
 
-from absl import app
-import time
-import gc
-
 import torch
 from torch.autograd import Variable
 import torch.nn.functional as F
 import torch.autograd as autograd
 import torch.optim as optim
+
+from tensorboardX import SummaryWriter
+
+from datetime import datetime
+import os
+from pathlib import PosixPath
+
+from absl import app
+import time
+import gc
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -27,8 +33,8 @@ from models import DeepStellar
 from env_wrapper import *
 
 
-# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-device = torch.device('cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 
 
 
@@ -55,13 +61,15 @@ class SimpleWorker(object):
         else:
             players = None
 
+        self.map_name = map_name
+
         env_seed = 1337 if test_mode else None
 
         self.screen_size = 84
         self.minimap_size = 84
 
         self.env_config = dict(
-            map_name=map_name,
+            map_name=self.map_name,
             players=players,
             agent_interface_format=features.AgentInterfaceFormat(
                 feature_dimensions=features.Dimensions(screen=self.screen_size, minimap=self.minimap_size),
@@ -91,25 +99,29 @@ class SimpleWorker(object):
             self.deep_stellar = self.deep_stellar.cuda()
 
         self.deep_stellar.train(False)
-        self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-3)
+        self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-4)
 
         self.num_forward_steps = 20
 
-    def run_n_times(self, max_number_of_episodes=100):
+    def run_n_times(self, max_number_of_episodes=10000):
         episode_counter = 0
-
-        data = {
-            'action_entropy': [],
-            'action_log': [],
-            'continous_log': [],
-            'value': [],
-            'predicted_value': [],
-            'reward': [], 
-        }
+        global_step = 0
 
         gamma = 0.95
-        entropy_weight = 1e-4
+        tau = 1.
+        entropy_weight = 1e-3
         max_grad_norm = 0.5
+
+        base_model_dir = PosixPath('/', 'sc2ai-models')
+        now_str =  datetime.now().strftime("%m.%d.%Y-%H:%M:%S")+'_'+self.map_name+'_1e-4_3steps'
+
+        model_output_dir = base_model_dir/now_str
+        model_logs_output_dir = model_output_dir/'logs'
+
+        os.makedirs(str(model_logs_output_dir))
+        print(f'Created {model_logs_output_dir}')
+
+        writer = SummaryWriter(str(model_logs_output_dir))
 
         with sc2_env.SC2Env(**self.env_config) as env:
             obs = env.reset()[0]
@@ -131,6 +143,7 @@ class SimpleWorker(object):
                     'predicted_value': [],
                     'reward': [], 
                 }
+                score = 0
                 gc.collect()
 
                 # take num_forward_steps simulation steps
@@ -158,6 +171,7 @@ class SimpleWorker(object):
 
                     # take step
                     obs = env.step([sc2_action])[0]
+                    score += np.sum(obs.reward)
                     episode_done = obs.last()
 
                     screen_0_prob = F.softmax(model_out[0][0], dim=1)
@@ -189,10 +203,17 @@ class SimpleWorker(object):
 
                     episode_length += 1
 
+                    global_step += 1
+
                     if episode_done:
+                        writer.add_scalar('episode_score/total', np.sum(obs.observation['score_cumulative'][0]), episode_counter)
+                        torch.save(self.deep_stellar, model_output_dir/f'_episode_{episode_counter}')
+
                         episode_counter += 1
                         episode_length = 0
                         obs = env.reset()[0]
+
+                        writer.file_writer.flush()
                         break
 
                 # estimate reward based on policy
@@ -205,40 +226,56 @@ class SimpleWorker(object):
                 reward = Variable(reward)
                 data['predicted_value'].append(reward)
 
-                policy_loss = 0.
-                value_loss = 0.
-                gae = torch.zeros(1,1).to(device)
+                policy_loss_vb = 0.
+                value_loss_vb = 0.
 
                 # go backwards in time from our latest step
                 reward_count = len(data['reward'])
-                # gae_ts = torch.zeros(1, 1).to(device)
+                gae_ts = torch.zeros(1, 1).to(device)
                 for i in reversed(range(reward_count)):
                     reward = gamma * reward + data['reward'][i]
                     data['value'].append(reward)
 
-                    # tderr_ts = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
+                    advantage_vb = reward - data['predicted_value'][i]
+                    value_loss_vb += 0.5 * advantage_vb.pow(2)
+
+                    tderr_ts = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
+                    gae_ts = gae_ts * gamma * tau + tderr_ts
+
+                    policy_log_for_action_vb =  data['screen_0_log'][i] + data['screen_1_log'][i] + data['minimap_0_log'][i] + data['action_log'][i]
+                    policy_loss_vb += -(policy_log_for_action_vb * Variable(gae_ts) + 
+                        entropy_weight * (
+                            data['screen_0_entropy'][i]+
+                            data['screen_1_entropy'][i]+
+                            data['minimap_0_entropy'][i]+
+                            data['action_entropy'][i]
+                        )
+                    )
+
 
                 data['value'].reverse()
 
-                values = torch.cat(data['value']).squeeze()
-                predicted_values = torch.cat(data['predicted_value'][:-1]).squeeze()
+                # values = torch.cat(data['value']).squeeze()
+                # predicted_values = torch.cat(data['predicted_value'][:-1]).squeeze()
 
-                advantages = predicted_values - values
+                # advantages = predicted_values - values
 
-                entropy = (torch.cat(data['screen_0_entropy']).sum() +
-                    torch.cat(data['screen_1_entropy']).sum() +
-                    torch.cat(data['minimap_0_entropy']).sum() +
-                    torch.cat(data['action_entropy']).sum())
-                action_gain = ((torch.cat(data['screen_0_log']) * advantages).mean() + 
-                    (torch.cat(data['screen_1_log']) * advantages).mean() + 
-                    (torch.cat(data['minimap_0_log']) * advantages).mean() + 
-                    (torch.cat(data['action_log']) * advantages).mean())
+                # entropy = (torch.cat(data['screen_0_entropy']).sum() +
+                #     torch.cat(data['screen_1_entropy']).sum() +
+                #     torch.cat(data['minimap_0_entropy']).sum() +
+                #     torch.cat(data['action_entropy']).sum())
+                # action_gain = ((torch.cat(data['screen_0_log']) * advantages).mean() + 
+                #     (torch.cat(data['screen_1_log']) * advantages).mean() + 
+                #     (torch.cat(data['minimap_0_log']) * advantages).mean() + 
+                #     (torch.cat(data['action_log']) * advantages).mean())
 
-                value_loss = advantages.pow(2).mean()
-                total_loss = value_loss - action_gain - entropy_weight * entropy
+                # value_loss = advantages.pow(2).mean()
+                # total_loss = value_loss - action_gain - entropy_weight * entropy
 
                 # if np.sum(np.array(data['reward'])) > 0:
                 #     print('hooray')
+
+                total_loss = policy_loss_vb + 0.5 * value_loss_vb
 
                 self.optimizer.zero_grad()
 
@@ -251,6 +288,11 @@ class SimpleWorker(object):
                 torch.nn.utils.clip_grad_norm_(self.deep_stellar.parameters(), max_grad_norm)
 
                 self.optimizer.step()
+
+                writer.add_scalar('step_loss/policy_loss', policy_loss_vb, global_step)
+                writer.add_scalar('step_loss/value_loss', value_loss_vb, global_step)
+                writer.add_scalar('step_loss/total_loss', total_loss, global_step)
+                writer.add_scalar('step_score/total', score, global_step)
 
                 if episode_counter > max_number_of_episodes:
                     break
@@ -320,9 +362,9 @@ class SimpleWorker(object):
 
 
 def main(unused_argv):
-    map_name = "MoveToBeacon" # "CollectMineralShards" "Simple64" MoveToBeacon
+    map_name = "CollectMineralShards" # "CollectMineralShards" "Simple64" MoveToBeacon
 
-    worker = SimpleWorker(map_name,visualize=True)
+    worker = SimpleWorker(map_name,visualize=False)
 
     worker.run_n_times()
 

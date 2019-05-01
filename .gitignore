@@ -1,6 +1,9 @@
 __pycache__
 pysc2
 temp
+local
+
+other_works
 
 tensorflow_baselines
 pysc2-rl-mini

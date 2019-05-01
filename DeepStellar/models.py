@@ -26,7 +26,8 @@ class DeepStellar(torch.nn.Module):
         super().__init__()
 
         padding_size = 1
-        conv_features = 64
+        conv_features = 32
+        after_concat_conv_features = 64
         dense_features = 256
 
         self.screen_cnn = nn.Sequential(
@@ -53,45 +54,45 @@ class DeepStellar(torch.nn.Module):
 
         # concat screen_cnn, minimap_cnn and repeated numerical features here
         self.post_concat_cnn = nn.Sequential(
-            nn.Conv2d(conv_features * 3, conv_features, kernel_size=3, stride=1, padding=padding_size),
+            nn.Conv2d(conv_features * 3, after_concat_conv_features, kernel_size=3, stride=1, padding=padding_size),
             nn.ReLU(inplace=True),
-            nn.Conv2d(conv_features, conv_features, kernel_size=3, stride=1, padding=padding_size),
+            nn.Conv2d(after_concat_conv_features, after_concat_conv_features, kernel_size=3, stride=1, padding=padding_size),
             nn.ReLU(inplace=True)
         )
         self.concat_avg = torch.nn.AvgPool2d((screen_width, screen_height))
 
         # actor head
         self.screen_0_cnn = nn.Sequential(
-            nn.Conv2d(conv_features, 1, kernel_size=3, stride=1, padding=padding_size),
+            nn.Conv2d(after_concat_conv_features, 1, kernel_size=3, stride=1, padding=padding_size),
             nn.ReLU(inplace=True),
             Flatten()
         )
 
         self.screen_1_cnn = nn.Sequential(
-            nn.Conv2d(conv_features, 1, kernel_size=3, stride=1, padding=padding_size),
+            nn.Conv2d(after_concat_conv_features, 1, kernel_size=3, stride=1, padding=padding_size),
             nn.ReLU(inplace=True),
             Flatten()
         )
 
         self.minimap_0_cnn = nn.Sequential(
-            nn.Conv2d(conv_features, 1, kernel_size=3, stride=1, padding=padding_size), # this is 84x84, gotta fix it
+            nn.Conv2d(after_concat_conv_features, 1, kernel_size=3, stride=1, padding=padding_size), # this is 84x84, gotta fix it
             nn.ReLU(inplace=True),
             Flatten()
         )
 
-        self.actor_dense = torch.nn.Linear(conv_features, dense_features)
+        self.actor_dense = torch.nn.Linear(after_concat_conv_features, dense_features)
         self.action_space_output = torch.nn.Linear(dense_features, action_space_len)
         self.first_argument_output = torch.nn.Linear(dense_features, 1)
 
         # critic head
         self.critic_output = nn.Sequential(
-            nn.Linear(conv_features, dense_features),
+            nn.Linear(after_concat_conv_features, dense_features),
             nn.ReLU(inplace=True),
             nn.Linear(dense_features, 1),
         )
 
         self.total_params = sum(p.numel() for p in self.parameters())
-        print(f'DeepStellar initialized, number of parameters: {self.total_params}')
+        print(f'DeepStellar model initialized, number of parameters: {self.total_params}')
 
     def forward(self, batch_screen, batch_minimap, batch_numerical):
         # x = (batch, smth)
