@@ -221,7 +221,7 @@ class SimpleWorker(object):
                 if not episode_done: 
                     # if we are not done yet, bootstrap value from our latest estimate
                     model_out = self.run_model_on_observation(obs)
-                    reward = model_out[0][5]
+                    reward = model_out[0][5] # predicted value
 
                 reward = Variable(reward)
                 data['predicted_value'].append(reward)
@@ -237,6 +237,7 @@ class SimpleWorker(object):
                     data['value'].append(reward)
 
                     advantage_vb = reward - data['predicted_value'][i]
+                    
                     value_loss_vb += 0.5 * advantage_vb.pow(2)
 
                     tderr_ts = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
@@ -362,9 +363,9 @@ class SimpleWorker(object):
 
 
 def main(unused_argv):
-    map_name = "CollectMineralShards" # "CollectMineralShards" "Simple64" MoveToBeacon
+    map_name = "MoveToBeacon" # "CollectMineralShards" "Simple64" MoveToBeacon
 
-    worker = SimpleWorker(map_name,visualize=False)
+    worker = SimpleWorker(map_name,visualize=True)
 
     worker.run_n_times()
 

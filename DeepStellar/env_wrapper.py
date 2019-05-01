@@ -81,7 +81,8 @@ def postprocess_action(model_out, screen_size, minimap_size):
 
             act_args.append([int(x), int(y)])
         elif arg.name in action_dict:
-            k = model_out[3] * (action_dict[arg.name] - 1)
+            # k = model_out[3] * (action_dict[arg.name] - 1)
+            k = 0
 
             act_args.append([int(k)])
         else:
