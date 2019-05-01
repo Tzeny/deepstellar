@@ -33,8 +33,8 @@ from models import DeepStellar
 from env_wrapper import *
 
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-# device = torch.device('cpu')
+# device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cpu')
 
 
 
@@ -99,7 +99,7 @@ class SimpleWorker(object):
             self.deep_stellar = self.deep_stellar.cuda()
 
         self.deep_stellar.train(False)
-        self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-4)
+        self.optimizer = optim.Adam(self.deep_stellar.parameters(), lr=1e-3)
 
         self.num_forward_steps = 20
 
@@ -123,6 +123,8 @@ class SimpleWorker(object):
 
         writer = SummaryWriter(str(model_logs_output_dir))
 
+        cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
         with sc2_env.SC2Env(**self.env_config) as env:
             obs = env.reset()[0]
 
@@ -139,6 +141,7 @@ class SimpleWorker(object):
                     'minimap_0_log': [],                     
                     'action_entropy': [],
                     'action_log': [],
+                    'policy_loss': [],
                     'value': [],
                     'predicted_value': [],
                     'reward': [], 
@@ -201,6 +204,14 @@ class SimpleWorker(object):
                     data['predicted_value'].append(model_out[0][5])
                     data['reward'].append(obs.reward)
 
+                    policy_loss = (
+                        cross_entropy_loss(model_out[0][0], model_out[1][0]) * screen_0_weight + # screen 0
+                        cross_entropy_loss(model_out[0][1], model_out[1][1]) * screen_1_weight + # screen 1
+                        cross_entropy_loss(model_out[0][2], model_out[1][2]) * minimap_0_weight + # minimap 0
+                        cross_entropy_loss(model_out[0][4], model_out[1][4]) # action
+                    )
+                    data['policy_loss'].append(policy_loss)
+
                     episode_length += 1
 
                     global_step += 1
@@ -228,6 +239,7 @@ class SimpleWorker(object):
 
                 policy_loss_vb = 0.
                 value_loss_vb = 0.
+                entropy_loss_vb = 0.
 
                 # go backwards in time from our latest step
                 reward_count = len(data['reward'])
@@ -236,47 +248,20 @@ class SimpleWorker(object):
                     reward = gamma * reward + data['reward'][i]
                     data['value'].append(reward)
 
-                    advantage_vb = reward - data['predicted_value'][i]
-                    
-                    value_loss_vb += 0.5 * advantage_vb.pow(2)
+                    advantage = reward - data['predicted_value'][i]
 
-                    tderr_ts = data['reward'][i] + gamma * data['predicted_value'][i+1] - data['predicted_value'][i]
-                    gae_ts = gae_ts * gamma * tau + tderr_ts
+                    policy_loss_vb += (advantage * data['policy_loss'][i]).mean().sum()
+                    value_loss_vb += advantage.pow(2) / 2.0
+                    entropy_loss_vb += data['screen_0_entropy'][i] + data['screen_1_entropy'][i] + data['minimap_0_entropy'][i] +  data['action_entropy'][i]
 
-                    policy_log_for_action_vb =  data['screen_0_log'][i] + data['screen_1_log'][i] + data['minimap_0_log'][i] + data['action_log'][i]
-                    policy_loss_vb += -(policy_log_for_action_vb * Variable(gae_ts) + 
-                        entropy_weight * (
-                            data['screen_0_entropy'][i]+
-                            data['screen_1_entropy'][i]+
-                            data['minimap_0_entropy'][i]+
-                            data['action_entropy'][i]
-                        )
-                    )
-
+                    # pg_loss = tf.reduce_mean(ADV * neglogpac)
+                    # vf_loss = tf.reduce_mean(tf.squared_difference(tf.squeeze(train_model.vf), R) / 2.0)
+                    # entropy = tf.reduce_mean(cat_entropy(train_model.pi))
+                    # loss = pg_loss - entropy * ent_coef + vf_loss * vf_coef
 
                 data['value'].reverse()
 
-                # values = torch.cat(data['value']).squeeze()
-                # predicted_values = torch.cat(data['predicted_value'][:-1]).squeeze()
-
-                # advantages = predicted_values - values
-
-                # entropy = (torch.cat(data['screen_0_entropy']).sum() +
-                #     torch.cat(data['screen_1_entropy']).sum() +
-                #     torch.cat(data['minimap_0_entropy']).sum() +
-                #     torch.cat(data['action_entropy']).sum())
-                # action_gain = ((torch.cat(data['screen_0_log']) * advantages).mean() + 
-                #     (torch.cat(data['screen_1_log']) * advantages).mean() + 
-                #     (torch.cat(data['minimap_0_log']) * advantages).mean() + 
-                #     (torch.cat(data['action_log']) * advantages).mean())
-
-                # value_loss = advantages.pow(2).mean()
-                # total_loss = value_loss - action_gain - entropy_weight * entropy
-
-                # if np.sum(np.array(data['reward'])) > 0:
-                #     print('hooray')
-
-                total_loss = policy_loss_vb + 0.5 * value_loss_vb
+                total_loss = policy_loss_vb - entropy_loss_vb * 0.01 + value_loss_vb * 0.5
 
                 self.optimizer.zero_grad()
 
@@ -316,8 +301,14 @@ class SimpleWorker(object):
             numerical_obs,
         )
 
-        selected_action_t = (F.softmax(action) * available_actions_obs)[0].multinomial(1)
-        selected_action = selected_action_t.cpu().detach().numpy()[0]
+        selected_action_t = (F.softmax(action) * available_actions_obs)[0]
+        if selected_action_t.sum() == 0:
+            selected_action_t = torch.Tensor([0]).long()
+            selected_action = 0
+        else:
+            selected_action_t = selected_action_t.multinomial(1)
+            selected_action = selected_action_t.cpu().detach().numpy()[0]
+        
 
         selected_screen_0_t = F.softmax(screen_0)[0].multinomial(1)
         selected_screen_0 = selected_screen_0_t.cpu().detach().numpy()[0]
@@ -363,7 +354,7 @@ class SimpleWorker(object):
 
 
 def main(unused_argv):
-    map_name = "MoveToBeacon" # "CollectMineralShards" "Simple64" MoveToBeacon
+    map_name = "CollectMineralShards" # "CollectMineralShards" "Simple64" MoveToBeacon
 
     worker = SimpleWorker(map_name,visualize=True)
 
